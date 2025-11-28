@@ -18,21 +18,23 @@ import numpy as np
 import matplotlib.pyplot as plt
 from functools import partial
 
-from safe_control_gym.utils.registration import make
-from safe_control_gym.controllers.ppo import PPO
-from safe_control_gym.experiments.base_experiment import BaseExperiment
+from safe_control_gym.utils.registration import make as make_registered, get_config
+from safe_control_gym.controllers.ppo.ppo import PPO
 
 
-def create_safe_env(gui=False, constraints=True, constraint_penalty=10.0):
+def create_safe_env(gui=False,
+                    constraints=True,
+                    constraint_penalty=10.0,
+                    seed=None,
+                    **kwargs):
     """Create cartpole environment with safety constraints.
 
     Args:
         gui: Whether to show PyBullet GUI.
         constraints: Whether to add safety constraints.
         constraint_penalty: Weight for constraint violation penalty.
-
-    Returns:
-        Environment instance.
+        seed: RNG seed passed in by vectorized env wrapper (optional).
+        **kwargs: Catch-all for any extra arguments.
     """
 
     constraint_list = []
@@ -40,31 +42,42 @@ def create_safe_env(gui=False, constraints=True, constraint_penalty=10.0):
     if constraints:
         constraint_list = [
             {
-                'constraint_type': 'BoundedConstraint',
-                'constrained_variable': 'state',
-                'active_dims': [0],  # Cart position
-                'upper_bounds': [0.9],
-                'lower_bounds': [-0.9],
+                "constraint_form": "bounded_constraint",
+                "constrained_variable": "state",
+                "active_dims": [0],  # Cart position
+                "upper_bounds": [0.9],
+                "lower_bounds": [-0.9],
             },
             {
-                'constraint_type': 'BoundedConstraint',
-                'constrained_variable': 'state',
-                'active_dims': [2],  # Pole angle
-                'upper_bounds': [0.3],
-                'lower_bounds': [-0.3],
+                "constraint_form": "bounded_constraint",
+                "constrained_variable": "state",
+                "active_dims": [2],  # Pole angle
+                "upper_bounds": [0.3],
+                "lower_bounds": [-0.3],
             },
         ]
 
-    env = make(
-        'cartpole',
-        gui=gui,
-        constraints=constraint_list,
-        done_on_violation=False,  # Don't terminate on violation
-        use_constraint_penalty=True,  # Penalty in reward
-        constraint_penalty=constraint_penalty,
-        ctrl_freq=50,
-        episode_len_sec=10,
-    )
+    env = make_registered(
+            'cartpole',
+            gui=gui,
+            constraints=constraint_list,
+            done_on_violation=False,      # Don't terminate on violation
+            use_constraint_penalty=True,  # Penalty in reward
+            constraint_penalty=constraint_penalty,
+            ctrl_freq=50,
+            episode_len_sec=10,
+        )
+
+    # Initialize missing attributes expected by CartPole._get_info
+    if not hasattr(env, "out_of_bounds"):
+        env.out_of_bounds = False
+
+    # Optional: actually use the seed
+    if seed is not None:
+        try:
+            env.reset(seed=seed)
+        except TypeError:
+            pass
 
     return env
 
@@ -77,38 +90,35 @@ def train_safe_ppo(output_dir='./results_safe_ppo'):
     print("=" * 60)
 
     # Create environment factory
-    env_func = partial(create_safe_env, gui=False, constraints=True,
-                      constraint_penalty=10.0)
+    env_func = partial(create_safe_env,
+                       gui=False,
+                       constraints=True,
+                       constraint_penalty=10.0)
 
-    # Create PPO controller
+    # Load default PPO config from ppo.yaml
+    cfg = get_config('ppo')  # this reads safe_control_gym/controllers/ppo/ppo.yaml
+
+    # You can override some defaults here if you like, e.g.:
+    # cfg.update({
+    #     "rollout_batch_size": 2048,
+    #     "num_workers": 4,
+    #     "norm_obs": True,
+    # })
+
+    # Create PPO controller using YAML config
     ppo = PPO(
         env_func=env_func,
         training=True,
         checkpoint_path='model_latest.pt',
         output_dir=output_dir,
-
-        # PPO hyperparameters
-        hidden_dim=256,
-        actor_lr=3e-4,
-        critic_lr=1e-3,
-        gamma=0.99,
-        clip_param=0.2,
-
-        # Training configuration
-        num_epochs=500,  # Reduced for demo (use 5000+ for full training)
-        rollout_batch_size=2048,
-        num_workers=4,  # Parallel environments
-        eval_batch_size=1,
-
-        # Normalization
-        norm_obs=True,
-        norm_reward=False,
+        **cfg,
     )
 
     print(f"\nTraining configuration:")
     print(f"  Output directory: {output_dir}")
-    print(f"  Number of epochs: {ppo.num_epochs}")
+    print(f"  Max env steps: {ppo.max_env_steps}")
     print(f"  Rollout batch size: {ppo.rollout_batch_size}")
+    print(f"  Rollout steps per update: {ppo.rollout_steps}")
     print(f"  Number of workers: {ppo.num_workers}")
 
     # Train
@@ -122,7 +132,8 @@ def train_safe_ppo(output_dir='./results_safe_ppo'):
     ppo.close()
 
 
-def evaluate_policy(use_cbf=False, model_path='./results_safe_ppo/model_latest.pt'):
+def evaluate_policy(use_cbf=False,
+                    model_path='./results_safe_ppo/model_latest.pt'):
     """Evaluate trained policy.
 
     Args:
@@ -141,12 +152,16 @@ def evaluate_policy(use_cbf=False, model_path='./results_safe_ppo/model_latest.p
     env_func = partial(create_safe_env, gui=True, constraints=True)
     env = env_func()
 
-    # Load PPO policy
+    # Load same PPO config to build the network correctly
+    cfg = get_config('ppo')
+
+    # Load PPO policy (evaluation mode)
     ppo = PPO(
         env_func=env_func,
         training=False,
         checkpoint_path=model_path,
-        output_dir='./temp'
+        output_dir='./temp',
+        **cfg,
     )
 
     # Load trained weights
@@ -179,7 +194,7 @@ def evaluate_policy(use_cbf=False, model_path='./results_safe_ppo/model_latest.p
     for episode in range(n_episodes):
         obs, _ = env.reset()
         done = False
-        episode_reward = 0
+        episode_reward = 0.0
         violation_count = 0
         intervention_count = 0
         step = 0
@@ -201,10 +216,10 @@ def evaluate_policy(use_cbf=False, model_path='./results_safe_ppo/model_latest.p
                 action = action_safe
 
             # Execute action
-            obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
+            obs, reward, terminated, info = env.step(action)
+            done = terminated
 
-            episode_reward += reward
+            episode_reward += float(reward)
 
             # Check constraint violations
             if env.constraints.is_violated(env):
@@ -219,17 +234,20 @@ def evaluate_policy(use_cbf=False, model_path='./results_safe_ppo/model_latest.p
 
         print(f"  Steps: {step}")
         print(f"  Reward: {episode_reward:.2f}")
-        print(f"  Violations: {violation_count} ({violation_count/step*100:.1f}%)")
+        print(f"  Violations: {violation_count} "
+              f"({(violation_count / max(step, 1)) * 100:.1f}%)")
         if use_cbf:
             print(f"  CBF interventions: {intervention_count} "
-                  f"({intervention_count/step*100:.1f}%)")
+                  f"({(intervention_count / max(step, 1)) * 100:.1f}%)")
 
     # Summary statistics
     print(f"\n" + "=" * 60)
     print("Evaluation Summary")
     print("=" * 60)
-    print(f"Average reward: {np.mean(episode_rewards):.2f} ± {np.std(episode_rewards):.2f}")
-    print(f"Average violations: {np.mean(episode_violations):.1f} ± {np.std(episode_violations):.1f}")
+    print(f"Average reward: {np.mean(episode_rewards):.2f} ± "
+          f"{np.std(episode_rewards):.2f}")
+    print(f"Average violations: {np.mean(episode_violations):.1f} ± "
+          f"{np.std(episode_violations):.1f}")
     if use_cbf:
         print(f"Average CBF interventions: {np.mean(cbf_interventions):.1f} ± "
               f"{np.std(cbf_interventions):.1f}")
@@ -262,8 +280,10 @@ def plot_training_progress(log_dir='./results_safe_ppo'):
     if 'eval/ep_reward_mean' in df.columns:
         ax.plot(df['step'], df['eval/ep_reward_mean'], linewidth=2)
         ax.fill_between(df['step'],
-                        df['eval/ep_reward_mean'] - df.get('eval/ep_reward_std', 0),
-                        df['eval/ep_reward_mean'] + df.get('eval/ep_reward_std', 0),
+                        df['eval/ep_reward_mean'] -
+                        df.get('eval/ep_reward_std', 0),
+                        df['eval/ep_reward_mean'] +
+                        df.get('eval/ep_reward_std', 0),
                         alpha=0.3)
     ax.set_xlabel('Steps')
     ax.set_ylabel('Episode Reward')
@@ -273,7 +293,8 @@ def plot_training_progress(log_dir='./results_safe_ppo'):
     # Constraint violations
     ax = axes[0, 1]
     if 'eval/constraint_violation' in df.columns:
-        ax.plot(df['step'], df['eval/constraint_violation'], linewidth=2, color='red')
+        ax.plot(df['step'], df['eval/constraint_violation'],
+                linewidth=2, color='red')
     ax.set_xlabel('Steps')
     ax.set_ylabel('Constraint Violations')
     ax.set_title('Safety Performance')
@@ -282,7 +303,8 @@ def plot_training_progress(log_dir='./results_safe_ppo'):
     # Episode length
     ax = axes[1, 0]
     if 'eval/ep_length' in df.columns:
-        ax.plot(df['step'], df['eval/ep_length'], linewidth=2, color='green')
+        ax.plot(df['step'], df['eval/ep_length'],
+                linewidth=2, color='green')
     ax.set_xlabel('Steps')
     ax.set_ylabel('Episode Length')
     ax.set_title('Episode Duration')
@@ -291,9 +313,11 @@ def plot_training_progress(log_dir='./results_safe_ppo'):
     # Learning stats
     ax = axes[1, 1]
     if 'train/actor_loss' in df.columns:
-        ax.plot(df['step'], df['train/actor_loss'], label='Actor Loss', linewidth=2)
+        ax.plot(df['step'], df['train/actor_loss'],
+                label='Actor Loss', linewidth=2)
     if 'train/critic_loss' in df.columns:
-        ax.plot(df['step'], df['train/critic_loss'], label='Critic Loss', linewidth=2)
+        ax.plot(df['step'], df['train/critic_loss'],
+                label='Critic Loss', linewidth=2)
     ax.set_xlabel('Steps')
     ax.set_ylabel('Loss')
     ax.set_title('Training Losses')
@@ -310,18 +334,19 @@ def plot_training_progress(log_dir='./results_safe_ppo'):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Safe PPO Training Example')
     parser.add_argument('--train', action='store_true',
-                       help='Train a new policy')
+                        help='Train a new policy')
     parser.add_argument('--eval', action='store_true',
-                       help='Evaluate trained policy')
+                        help='Evaluate trained policy')
     parser.add_argument('--use_cbf', action='store_true',
-                       help='Use CBF safety filter during evaluation')
+                        help='Use CBF safety filter during evaluation')
     parser.add_argument('--plot', action='store_true',
-                       help='Plot training progress')
-    parser.add_argument('--output_dir', type=str, default='./results_safe_ppo',
-                       help='Output directory')
+                        help='Plot training progress')
+    parser.add_argument('--output_dir', type=str,
+                        default='./results_safe_ppo',
+                        help='Output directory')
     parser.add_argument('--model_path', type=str,
-                       default='./results_safe_ppo/model_latest.pt',
-                       help='Path to trained model')
+                        default='./results_safe_ppo/model_latest.pt',
+                        help='Path to trained model')
 
     args = parser.parse_args()
 
@@ -329,7 +354,8 @@ if __name__ == "__main__":
         train_safe_ppo(output_dir=args.output_dir)
 
     if args.eval:
-        evaluate_policy(use_cbf=args.use_cbf, model_path=args.model_path)
+        evaluate_policy(use_cbf=args.use_cbf,
+                        model_path=args.model_path)
 
     if args.plot:
         plot_training_progress(log_dir=args.output_dir)

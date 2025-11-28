@@ -26,29 +26,33 @@ def constrained_environment_demo():
     # Define constraints
     constraints = [
         {
-            'constraint_type': 'BoundedConstraint',
-            'constrained_variable': 'state',
-            'active_dims': [0],  # Cart position
-            'upper_bounds': [0.8],
-            'lower_bounds': [-0.8],
-            'strict': False
+            # Use the dict key as in AVAILABLE_CONSTRAINTS
+            "constraint_form": "bounded_constraint",
+            # This gets passed as `constrained_variable` into BoundedConstraint
+            "constrained_variable": "state",   # will be wrapped into ConstrainedVariableType.STATE
+            "active_dims": [0],                # cart position
+            "lower_bounds": [-0.8],
+            "upper_bounds": [0.8],
+            "strict": False,
         },
         {
-            'constraint_type': 'BoundedConstraint',
-            'constrained_variable': 'state',
-            'active_dims': [2],  # Pole angle
-            'upper_bounds': [0.25],  # ~14 degrees
-            'lower_bounds': [-0.25],
-            'strict': False
+            "constraint_form": "bounded_constraint",
+            "constrained_variable": "state",
+            "active_dims": [2],                # pole angle
+            "lower_bounds": [-0.25],           # ~ -14 deg
+            "upper_bounds": [0.25],            # ~  14 deg
+            "strict": False,
         },
         {
-            'constraint_type': 'BoundedConstraint',
-            'constrained_variable': 'input',
-            'upper_bounds': [15.0],  # Force limit
-            'lower_bounds': [-15.0],
-            'strict': False
-        }
+            "constraint_form": "bounded_constraint",
+            "constrained_variable": "input",
+            # note: no active_dims -> applies to all inputs
+            "lower_bounds": [-15.0],
+            "upper_bounds": [15.0],
+            "strict": False,
+        },
     ]
+
 
     # Create environment with constraints
     env = make(
@@ -80,16 +84,16 @@ def constrained_environment_demo():
     step = 0
     violation_count = 0
 
-    while not done and step < 300:
+    while step < 300:
         # Random action
         action = env.action_space.sample()
 
         # Step environment
-        obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+        obs, reward, terminated, info = env.step(action)
+        done = terminated
 
         # Check constraint violations
-        constraint_values = env.constraints.get_value(env)
+        constraint_values = env.constraints.get_values(env)
         violated = env.constraints.is_violated(env)
 
         if violated:

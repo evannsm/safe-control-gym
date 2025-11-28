@@ -60,8 +60,8 @@ def basic_environment_demo():
         action = env.action_space.sample()
 
         # Step environment
-        obs, reward, terminated, truncated, info = env.step(action)
-        done = terminated or truncated
+        obs, reward, terminated, info = env.step(action)
+        done = terminated
 
         # Store data
         states.append(obs.copy())
